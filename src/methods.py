@@ -164,7 +164,11 @@ def classification_agent(
             logger.error("Failed to get structured response from the model.")
             state["decision"] = "unknown"
             state["data"] = state["input"]
-            state["classification_message"] = "Unable to determine request type."
+            state["classification_message"] = (
+                "I couldn't match your request to a department. Try rephrasing "
+                "with a specific topic — for example legal, HR, sales, "
+                "procurement, or technical support."
+            )
             state["workflow_complete"] = True
             return state
 
@@ -183,7 +187,11 @@ def classification_agent(
             )
             state["decision"] = "unknown"
             state["data"] = state["input"]
-            state["classification_message"] = "Unable to determine request type."
+            state["classification_message"] = (
+                "I couldn't match your request to a department. Try rephrasing "
+                "with a specific topic — for example legal, HR, sales, "
+                "procurement, or technical support."
+            )
             state["workflow_complete"] = True
             return state
 
@@ -200,6 +208,18 @@ def classification_agent(
 
     state["decision"] = classification_result.classification
     state["data"] = state["input"]
+
+    # The model can legitimately classify a request as 'unknown' when it does
+    # not fit any department. Surface this as a friendly, actionable prompt
+    # instead of a generic error so the UI renders the graceful "Unable to
+    # Process" path rather than "An error occurred."
+    if classification_result.classification == "unknown":
+        state["classification_message"] = (
+            "I couldn't match your request to a department. Try rephrasing with "
+            "a specific topic — for example legal, HR, sales, procurement, or "
+            "technical support."
+        )
+        state["workflow_complete"] = True
 
     agent_end_time = time.time()
     state["agent_timings"]["Classification"] = agent_end_time - agent_start_time
