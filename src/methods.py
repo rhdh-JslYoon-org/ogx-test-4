@@ -15,6 +15,64 @@ from src.utils import extract_mcp_output, logger, submission_states
 # MCP Server URL - read from environment or use default
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", DEFAULT_MCP_SERVER_URL)
 
+# Llama Guard 3 hazard taxonomy: maps the S-codes the model emits to
+# human-readable category names. OGX 1.2.5 removed the server-side
+# /v1/moderations endpoint, so the guardrail runs the configured guard model
+# (e.g. ollama/llama-guard3:8b) directly via chat completions instead.
+LLAMA_GUARD_CATEGORIES = {
+    "S1": "Violent Crimes",
+    "S2": "Non-Violent Crimes",
+    "S3": "Sex-Related Crimes",
+    "S4": "Child Sexual Exploitation",
+    "S5": "Defamation",
+    "S6": "Specialized Advice",
+    "S7": "Privacy",
+    "S8": "Intellectual Property",
+    "S9": "Indiscriminate Weapons",
+    "S10": "Hate",
+    "S11": "Suicide & Self-Harm",
+    "S12": "Sexual Content",
+    "S13": "Elections",
+    "S14": "Code Interpreter Abuse",
+}
+
+
+def run_guardrail(
+    openai_client: "OpenAI", guardrail_model: str, text: str
+) -> "tuple[bool, list[str]]":
+    """Screen text for unsafe content with a Llama Guard chat model.
+
+    OGX 1.2.5 no longer serves an OpenAI-compatible /v1/moderations endpoint,
+    so instead of ``openai_client.moderations.create()`` the text is sent to the
+    guard model as a chat completion. Llama Guard replies with ``safe`` or
+    ``unsafe`` followed by a newline and the violated S-codes (e.g. ``S1,S10``).
+
+    Returns a ``(flagged, categories)`` tuple where ``categories`` holds the
+    human-readable names of the violated hazard categories.
+    """
+    guard_messages: "list[ChatCompletionUserMessageParam]" = [
+        cast(
+            ChatCompletionUserMessageParam,
+            {"role": "user", "content": text},
+        )
+    ]
+    guard_completion = openai_client.chat.completions.create(
+        model=guardrail_model,
+        messages=guard_messages,
+    )
+    verdict = (guard_completion.choices[0].message.content or "").strip()
+    if not verdict.lower().startswith("unsafe"):
+        return False, []
+
+    # The line after "unsafe" lists the violated S-codes, if any.
+    codes_line = verdict.split("\n", 1)[1].strip() if "\n" in verdict else ""
+    categories = [
+        LLAMA_GUARD_CATEGORIES.get(code.strip(), code.strip())
+        for code in codes_line.split(",")
+        if code.strip()
+    ]
+    return True, categories
+
 
 def classification_agent(
     state: "WorkflowState",
@@ -55,25 +113,17 @@ def classification_agent(
         )
 
     # checking if the input is safe
-    safety_response = openai_client.moderations.create(
-        model=guardrail_model, input=str(state["input"])
+    flagged, flagged_categories = run_guardrail(
+        openai_client, guardrail_model, str(state["input"])
     )
 
-    for moderation in safety_response.results:
-        if not moderation.flagged:
-            continue
-
+    if flagged:
         logger.info(
-            f"Classification result: '{state['input']}' is flagged as '{moderation}'"
+            f"Classification result: '{state['input']}' is flagged as unsafe "
+            f"for: {flagged_categories}"
         )
         state["decision"] = "unsafe"
         state["data"] = state["input"]
-        model_extra = moderation.categories.model_extra
-        flagged_categories = [
-            key
-            for key, value in (model_extra.items() if model_extra else [])
-            if value is True
-        ]
         categories_str = ", ".join(flagged_categories)
         state["classification_message"] = (
             f"Classification result: '{state['input']}' "
